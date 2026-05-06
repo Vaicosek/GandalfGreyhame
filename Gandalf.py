@@ -1,6 +1,7 @@
 import asyncio
 
 import discord
+from collections import defaultdict
 from discord import app_commands
 from discord.ext import tasks
 import matplotlib.pyplot as plt  # Ensure you're using pyplot for plotting
@@ -17,9 +18,8 @@ CONFIG_FILE = "config.json"
 BACKUP_FILE = "backup_data.json"
 COMMANDER_ROLE = "BotCommander"  # Name of the role that has elevated privileges
 PROJECTS_BACKUP_FILE = "projects_backup.json"
-loans = {}
+auction_counters = {}
 projects = {}
-LOANS_BACKUP_FILE = "loans_backup.json"
 DURATION_CHOICES = [
     app_commands.Choice(name="1 Week", value="1 Week"),
     app_commands.Choice(name="2 Weeks", value="2 Weeks"),
@@ -29,7 +29,7 @@ DURATION_CHOICES = [
     app_commands.Choice(name="3 Months", value="3 Months"),
     app_commands.Choice(name="4 Months", value="4 Months"),
 ]
-
+user_auction_count = defaultdict(int)
 
 # Load bot configuration
 if os.path.exists(CONFIG_FILE):
@@ -59,6 +59,8 @@ user_data = {
     }
 }
 
+
+
 current_interest_rate = 0.0  # Default rate, set bi-weekly
 fund_history = []  # Track total fund balance over time for reporting
 @tasks.loop(hours=6)
@@ -80,13 +82,6 @@ async def backup_data_task():
         json.dump(projects, f, indent=4)
     print("Projects data backup completed.")
 
-    # Backup loans data
-    if not os.path.exists(LOANS_BACKUP_FILE):
-        with open(LOANS_BACKUP_FILE, "w") as f:
-            json.dump({}, f, indent=4)
-    with open(LOANS_BACKUP_FILE, "w") as f:
-        json.dump(loans, f, indent=4)
-    print("Loans data backup completed.")
 
 
 def validate_backup(filepath, default_data):
@@ -103,11 +98,10 @@ def validate_backup(filepath, default_data):
 async def on_ready():
     print(f"{client.user} is now running!")
 
-    # Load backups for user data, projects, and loans
+    # Load backups for user data, projects
     try:
         load_backup()
         load_projects_backup()
-        load_loans_backup()
         print("All backup data loaded successfully.")
     except Exception as e:
         print(f"Error while loading backups: {e}")
@@ -146,18 +140,6 @@ def load_backup():
             json.dump({"user_data": user_data, "fund_history": fund_history}, f, indent=4)
 
 
-def load_loans_backup():
-    global loans
-    if os.path.exists(LOANS_BACKUP_FILE):
-        with open(LOANS_BACKUP_FILE, "r") as f:
-            loans = json.load(f)
-            print("Loans data loaded successfully.")
-    else:
-        print("Loans backup file not found. Creating a new one.")
-        loans = {}
-        with open(LOANS_BACKUP_FILE, "w") as f:
-            json.dump(loans, f, indent=4)
-
 def load_projects_backup():
     global projects
     if os.path.exists(PROJECTS_BACKUP_FILE):
@@ -171,7 +153,7 @@ def load_projects_backup():
             json.dump(projects, f, indent=4)
 
 
-@tree.command(name="load_backups", description="Manually load backups for user accounts, projects, and loans (Admin only).")
+@tree.command(name="load_backups", description="Manually load backups for user accounts, projects (Admin only).")
 async def load_backups(interaction: discord.Interaction):
     """Manually load all backup data."""
     if not has_commander_role(interaction):
@@ -182,7 +164,6 @@ async def load_backups(interaction: discord.Interaction):
         # Load all backups
         load_backup()
         load_projects_backup()
-        load_loans_backup()
         await interaction.response.send_message("All backups have been successfully loaded.", ephemeral=True)
         print("Backups successfully reloaded.")
     except Exception as e:
@@ -335,24 +316,33 @@ async def initial_deposit(interaction: discord.Interaction, user: discord.User =
 
 
 # Command: View Balance
-@tree.command(name="balance", description="View your own or another user's balance.")
+@tree.command(name="balance", description="View your balance including projects.")
 async def balance(interaction: discord.Interaction, user: discord.User = None):
-    if user:
-        if not has_commander_role(interaction):
-            await interaction.response.send_message("You do not have permission to view another user's balance.", ephemeral=True)
-            return
-        user_id = str(user.id)
-        if user_id in user_data:
-            await interaction.response.send_message(f"{user.display_name}'s current balance: {user_data[user_id]['balance']:.2f}")
-        else:
-            await interaction.response.send_message("User not found.")
-    else:
-        user_id = str(interaction.user.id)  # Use the command sender's own ID
-        if user_id in user_data:
-            await interaction.response.send_message(f"Your current balance: {user_data[user_id]['balance']:.2f}")
-        else:
-            await interaction.response.send_message("No account found for you.")
+    """Display detailed balance information."""
+    user_id = str(user.id) if user else str(interaction.user.id)
 
+    if user_id not in user_data:
+        await interaction.response.send_message(
+            "No account found for this user.", ephemeral=True
+        )
+        return
+
+    user_balance = user_data[user_id].get("balance", 0.0)
+
+    # Calculate specific user's investments
+    user_project_investments = sum(
+        project["investors"].get(user_id, 0) for project in projects.values() if project["status"] == "active"
+    )
+
+
+    message = (
+        f"**Balance Details**\n"
+        f"🔹 **Wallet Balance**: {user_balance:.2f} coins\n"
+        f"🔹 **Invested in Projects**: {user_project_investments:.2f} coins\n"
+        f"🔹 **Total Balance (Including Investments)**: {user_balance + user_project_investments:.2f} coins"
+    )
+
+    await interaction.response.send_message(message, ephemeral=True)
 
 @tree.command(name="apply_interest_now", description="Manually apply bi-weekly interest to all accounts (Admin only).")
 async def apply_interest_now(interaction: discord.Interaction):
@@ -379,7 +369,7 @@ async def apply_interest_now(interaction: discord.Interaction):
         finance_updates_mention = finance_updates_role.mention if finance_updates_role else "`Finance Updates` role"
         await finance_updates_channel.send(
             f"{finance_updates_mention}, the interest has been manually applied!\n\n"
-            f"**Global Interest Rate**: {current_interest_rate:.2f}%\n"
+            f"**Global Interest Rate**: {current_interest_rate * 100:.2f}%\n"
             "All accounts (bank and project investments) have been updated accordingly."
         )
 
@@ -529,51 +519,50 @@ async def withdrawal_fee(interaction: discord.Interaction):
     )
 
 # Command: Generate Balance History Graph
-@tree.command(name="generate_graph", description="Generate a balance history graph for a user.")
-async def generate_graph(interaction: discord.Interaction, user: discord.User = None):
-    user_id = str(user.id) if user else str(interaction.user.id)
+@tree.command(name="generate_graph", description="Generate a graph of your balance history including projects.")
+async def generate_graph(interaction: discord.Interaction):
+    """Generate a graph showing balance history including project investments."""
+    user_id = str(interaction.user.id)
 
     if user_id not in user_data:
         await interaction.response.send_message("No data found for this user.", ephemeral=True)
         return
 
-    # Extract data for graphing
     history = user_data[user_id].get("history", [])
     if not history:
-        await interaction.response.send_message("No history data available for this user.", ephemeral=True)
+        await interaction.response.send_message("No history data available.", ephemeral=True)
         return
 
+    # Extract wallet balance history
     dates, balances = zip(*history)
-    buf = plot_graph(dates, balances, f"Balance History for {user.display_name if user else interaction.user.display_name}", "Date/Time", "Balance")
+
+    # Calculate investments in projects
+    project_history = [
+        sum(project["investors"].get(user_id, 0) for project in projects.values() if project["status"] == "active")
+        for _ in dates
+    ]
+
+    # **Fixed: Only use balances and project_history (Loans removed)**
+    total_balance = [b + p for b, p in zip(balances, project_history)]
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(dates, balances, marker="o", label="Wallet Balance", linestyle="dashed")
+    plt.plot(dates, total_balance, marker="o", label="Total Balance (Wallet + Projects)", linestyle="solid")
+
+    plt.title(f"Balance History for {interaction.user.display_name}")
+    plt.xlabel("Date/Time")
+    plt.ylabel("Balance (coins)")
+    plt.xticks(rotation=45)
+    plt.legend()
+
+    # Save graph
+    buf = BytesIO()
+    plt.savefig(buf, format="png")
+    buf.seek(0)
+    plt.close()
+
     await interaction.response.defer()
     await interaction.followup.send(file=discord.File(buf, filename="balance_graph.png"))
-
-
-# Command: Generate Total Fund Report
-@tree.command(name="generate_fund_report", description="Generate a total fund balance history graph (Admin only).")
-async def generate_fund_report(interaction: discord.Interaction):
-    if not has_commander_role(interaction):
-        await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
-        return
-
-    if not fund_history:
-        await interaction.response.send_message("No fund history data available.", ephemeral=True)
-        return
-
-    # Extract data for graphing
-    dates, total_balances = zip(*fund_history)
-
-    # Use the same plotting logic as generate_graph
-    buf = plot_graph(
-        dates,
-        total_balances,  # No need to divide by a million unless explicitly required
-        "Total Fund Balance Over Time",
-        "Date/Time",
-        "Total Balance (coins)"
-    )
-
-    await interaction.response.defer()
-    await interaction.followup.send(file=discord.File(buf, filename="fund_report.png"))
 
 
 # Command: Transfer Account Ownership
@@ -603,7 +592,7 @@ async def project_name_autocomplete(interaction: discord.Interaction, current: s
 
 async def autocomplete_projects(interaction: discord.Interaction, current: str):
     # Force include specific projects
-    hardcoded_projects = ["War Plan RED", "Greyhames DILF XP"]
+    hardcoded_projects = ["Greyhames DILF XP"]
 
     # Combine hardcoded projects with other active projects dynamically
     all_projects = hardcoded_projects + [
@@ -852,312 +841,7 @@ async def edit_project(
         f"🔹 **Expected Duration**: {project['expected_duration']}\n",
         ephemeral=True
     )
-
-
-async def loan_id_autocomplete(interaction: discord.Interaction, current: str):
-    """Autocomplete function to display loan titles."""
-    print(f"Autocomplete invoked for command: {interaction.command.name} with input: {current}")
-    print(f"Current loans dictionary: {loans}")
-
-    if interaction.command.name == "approve_loan":
-        # Filter loans pending approval and display their titles with IDs
-        choices = [
-            app_commands.Choice(name=f"{details['title']} (ID: {loan_id})", value=loan_id)
-            for loan_id, details in loans.items()
-            if details.get("status") == "pending_approval" and current.lower() in details['title'].lower()
-        ]
-    elif interaction.command.name == "opt_into_loan":
-        # Filter approved loans and display their titles with IDs
-        choices = [
-            app_commands.Choice(name=f"{details['title']} (ID: {loan_id})", value=loan_id)
-            for loan_id, details in loans.items()
-            if details.get("status") == "approved" and current.lower() in details['title'].lower()
-        ]
-    elif interaction.command.name == "finish_loan":
-        # Filter running loans and display their titles with IDs
-        choices = [
-            app_commands.Choice(name=f"{details['title']} (ID: {loan_id})", value=loan_id)
-            for loan_id, details in loans.items()
-            if details.get("status") == "running" and current.lower() in details['title'].lower()
-        ]
-        print(f"Filtered running loans: {choices}")
-    elif interaction.command.name == "edit_loan":
-        # Include both pending and approved loans for editing
-        choices = [
-            app_commands.Choice(name=f"{details['title']} (ID: {loan_id})", value=loan_id)
-            for loan_id, details in loans.items()
-            if details.get("status") in ["pending_approval", "approved"] and current.lower() in details['title'].lower()
-        ]
-    else:
-        # Default to no choices if the command is unrecognized
-        choices = []
-
-    print(f"Generated Choices: {choices}")
-    return choices
-
-
-
-@tree.command(name="request_loan", description="Request a new loan.")
-async def request_loan(
-    interaction: discord.Interaction,
-    title: str,
-    amount: float,
-    backing_value: float,
-    description: str,
-    duration: Literal[
-        "1 Week", "2 Weeks", "3 Weeks", "1 Month", "2 Months", "3 Months", "4 Months"
-    ],
-):
-    if backing_value < 0.1 * amount:  # Check if backing value meets the minimum requirement
-        await interaction.response.send_message("The backing value must be at least 10% of the loan amount.", ephemeral=True)
-        return
-
-    # Generate a unique loan ID
-    loan_id = f"loan_{len(loans) + 1}"
-
-    # Save loan details
-    loans[loan_id] = {
-        "title": title,
-        "amount": amount,
-        "backing_value": backing_value,
-        "description": description,
-        "duration": duration,
-        "status": "pending_approval",
-        "interest_rate": None,
-        "investors": {},
-    }
-
-    guild = interaction.guild
-    loan_tickets_category = discord.utils.get(guild.categories, name="Loan Tickets")
-
-    if not loan_tickets_category:
-        await interaction.response.send_message(
-            "Loan Tickets category not found. Please create a category named 'Loan Tickets'.", ephemeral=True
-        )
-        return
-
-    # Get the BotCommander role
-    bot_commander_role = discord.utils.get(guild.roles, name="BotCommander")
-
-    # Create a new channel in the Loan Tickets category
-    channel_name = f"{interaction.user.name}-loan"
-    loan_channel = await guild.create_text_channel(
-        name=channel_name,
-        category=loan_tickets_category,
-        overwrites={
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),  # Default role can't view
-            interaction.user: discord.PermissionOverwrite(view_channel=True),  # User who made the request
-            bot_commander_role: discord.PermissionOverwrite(view_channel=True),  # BotCommander role can view
-        },
-    )
-
-    bot_commander_mention = bot_commander_role.mention if bot_commander_role else "`BotCommander` role"
-    await loan_channel.send(
-        f"{bot_commander_mention}, a new loan request has been created and is awaiting approval!\n\n"
-        f"**Title**: {title}\n"
-        f"**Amount Requested**: {amount:,.2f} coins\n"
-        f"**Backing Value**: {backing_value:,.2f} coins\n"
-        f"**Description**: {description}\n"
-        f"**Duration**: {duration}\n\n"
-        f"Use `/approve_loan` to approve this loan request."
-    )
-
-    # Send only a single response to the interaction
-    await interaction.response.send_message(
-        f"Your loan request has been submitted. Check {loan_channel.mention} for updates.", ephemeral=True
-    )
-
-
-
-@tree.command(name="edit_loan", description="Edit a loan's title or backing value (Admin only).")
-@app_commands.autocomplete(loan_id=loan_id_autocomplete)
-async def edit_loan(interaction: discord.Interaction, loan_id: str, title: str = None, backing_value: float = None):
-    """Edit a loan's title or backing value."""
-    if not has_commander_role(interaction):
-        await interaction.response.send_message("You do not have permission to edit loans.", ephemeral=True)
-        return
-
-    if loan_id not in loans:
-        await interaction.response.send_message("Invalid loan ID. No such loan exists.", ephemeral=True)
-        return
-
-    loan = loans[loan_id]
-
-    # Update the title if provided
-    if title:
-        loan["title"] = title
-
-    # Update the backing value if provided
-    if backing_value is not None:
-        if backing_value < 0.1 * loan["amount"]:
-            await interaction.response.send_message(
-                "The backing value must be at least 10% of the loan amount.", ephemeral=True
-            )
-            return
-        loan["backing_value"] = backing_value
-
-    # Save changes back to the loans dictionary
-    loans[loan_id] = loan
-
-    # Confirm the changes
-    await interaction.response.send_message(
-        f"Loan '{loan_id}' has been updated:\n"
-        f"🔹 **Title**: {loan['title']}\n"
-        f"🔹 **Backing Value**: {loan['backing_value']:.2f} coins",
-        ephemeral=True,
-    )
-
-# Command: Approve Loan
-@tree.command(name="approve_loan", description="Approve a loan request and set an interest rate (Admin only).")
-@app_commands.autocomplete(loan_id=loan_id_autocomplete)
-async def approve_loan(interaction: discord.Interaction, loan_id: str, interest_rate: float):
-    if not has_commander_role(interaction):
-        await interaction.response.send_message("You do not have permission to approve loans.", ephemeral=True)
-        return
-
-    if loan_id not in loans or loans[loan_id].get("status") != "pending_approval":
-        await interaction.response.send_message("Invalid loan ID or the loan is not pending approval.", ephemeral=True)
-        return
-
-    loans[loan_id]["interest_rate"] = interest_rate
-    loans[loan_id]["status"] = "approved"  # Mark the loan as approved
-
-    # Notify about the loan approval
-    investment_channel = discord.utils.get(interaction.guild.text_channels, name="loan-board")
-    if not investment_channel:
-        await interaction.response.send_message("Loan board channel not found.", ephemeral=True)
-        return
-
-    investor_role = discord.utils.get(interaction.guild.roles, name="Investor")
-    investor_mention = investor_role.mention if investor_role else "`Investor` role"
-    await investment_channel.send(
-        f"{investor_mention}, a new loan request has been approved and is now available for investment!\n\n"
-        f"**Title**: {loans[loan_id]['title']}\n"
-        f"**Amount Requested**: {loans[loan_id]['amount']:,.2f} coins\n"
-        f"**Backing Value**: {loans[loan_id]['backing_value']:,.2f} coins\n"
-        f"**Description**: {loans[loan_id]['description']}\n"
-        f"**Duration**: {loans[loan_id]['duration']}\n"
-        f"**Interest Rate**: {interest_rate:.2f}%\n\n"
-        "Get started by opting into this loan!"
-    )
-
-    await interaction.response.send_message(f"Loan '{loan_id}' has been approved and posted to the loan board.", ephemeral=True)
-
-@tree.command(name="opt_into_loan", description="Invest in a loan.")
-@app_commands.autocomplete(loan_id=loan_id_autocomplete)
-async def opt_into_loan(interaction: discord.Interaction, loan_id: str, amount: float):
-    user_id = str(interaction.user.id)
-
-    # Check if the user has the 'Investor' role
-    investor_role = discord.utils.get(interaction.guild.roles, name="Investor")
-    if not investor_role or investor_role not in interaction.user.roles:
-        await interaction.response.send_message("You must have the 'Investor' role to use this command.", ephemeral=True)
-        return
-
-    if loan_id not in loans or loans[loan_id].get("status") != "approved":
-        await interaction.response.send_message("Invalid loan ID or the loan is not available for investment.", ephemeral=True)
-        return
-
-    if user_id not in user_data or user_data[user_id]["balance"] < amount:
-        await interaction.response.send_message("Insufficient balance to invest in this loan.", ephemeral=True)
-        return
-
-    loan = loans[loan_id]
-    remaining_amount = loan["amount"] - loan.get("total_invested", 0)
-
-    # Check if the user is attempting to invest more than the remaining amount
-    if amount > remaining_amount:
-        await interaction.response.send_message(
-            f"Cannot invest {amount:,.2f} coins. Only {remaining_amount:,.2f} coins are needed to fully fund this loan.",
-            ephemeral=True
-        )
-        return
-
-    # Deduct the amount and update loan details
-    user_data[user_id]["balance"] -= amount
-    loan["investors"] = loan.get("investors", {})
-    loan["investors"][user_id] = loan["investors"].get(user_id, 0) + amount
-    loan["total_invested"] = loan.get("total_invested", 0) + amount
-
-    # Check if the loan is fully funded
-    if loan["total_invested"] >= loan["amount"]:
-        loan["status"] = "running"
-
-        # Notify investors and admins
-        investor_mention = investor_role.mention if investor_role else "`Investor` role"
-        await interaction.channel.send(
-            f"{investor_mention}, the loan '{loan_id}' has been fully funded and is now running! Please transfer the money in-game."
-        )
-
-    await interaction.response.send_message(f"Successfully invested {amount:,.2f} coins into loan '{loan_id}'.", ephemeral=True)
-
-
-@tree.command(name="finish_loan", description="Finish a running loan and distribute funds to investors.")
-@app_commands.autocomplete(loan_id=loan_id_autocomplete)
-async def finish_loan(interaction: discord.Interaction, loan_id: str, shares: float):
-    print(f"finish_loan invoked with loan_id: {loan_id} and shares: {shares}")
-
-    if not has_commander_role(interaction):
-        await interaction.response.send_message("You do not have permission to finish loans.", ephemeral=True)
-        print("Permission denied for finish_loan.")
-        return
-
-    if loan_id not in loans:
-        await interaction.response.send_message("Invalid loan ID. No such loan exists.", ephemeral=True)
-        print(f"Loan ID {loan_id} not found in loans.")
-        return
-
-    loan = loans.get(loan_id)
-    if loan.get("status") != "running":
-        await interaction.response.send_message("The loan is not currently running.", ephemeral=True)
-        print(f"Loan {loan_id} is not in 'running' status. Current status: {loan.get('status')}")
-        return
-
-    # Calculate total repayment and shares
-    total_interest = loan["amount"] * (loan["interest_rate"] / 100)
-    total_repayment = loan["amount"] + total_interest
-    bot_share = (shares / 100) * total_repayment
-    investor_repayment_pool = total_repayment - bot_share
-
-    # Add bot's share to specific user account (ID: 262945457045635075)
-    receiver_id = "262945457045635075"  # Replace with the intended user's ID
-    if receiver_id not in user_data:
-        user_data[receiver_id] = {"balance": 0.0, "history": []}
-
-    user_data[receiver_id]["balance"] += bot_share
-    user_data[receiver_id]["history"].append(
-        (datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), user_data[receiver_id]["balance"])
-    )
-    print(f"Transferred {bot_share} to user with ID {receiver_id}. New balance: {user_data[receiver_id]['balance']}")
-
-    # Distribute remaining funds to investors
-    for user_id, invested_amount in loan["investors"].items():
-        repayment = invested_amount + (invested_amount / loan["amount"]) * investor_repayment_pool
-        user_data[user_id]["balance"] += repayment
-
-        # Notify the user
-        try:
-            user = await client.fetch_user(int(user_id))
-            await user.send(
-                f"Your investment in loan '{loan_id}' has been repaid!\n"
-                f"**Initial Investment**: {invested_amount:,.2f} coins\n"
-                f"**Total Repaid (with Interest)**: {repayment:,.2f} coins\n"
-                f"**Interest Earned**: {(repayment - invested_amount):,.2f} coins\n"
-            )
-        except discord.Forbidden:
-            print(f"Could not send DM to user {user_id}. They may have DMs disabled.")
-
-    # Mark loan as finished
-    loan["status"] = "finished"
-    print(f"Loan {loan_id} marked as finished.")
-
-    await interaction.response.send_message(
-        f"The loan '{loan_id}' has been successfully finished.\n"
-        f"**Shares to User (ID: {receiver_id})**: {bot_share:,.2f} coins.\n"
-        f"Investors have been notified.",
-        ephemeral=True
-    )
-
+9
 
 @tree.command(name="info", description="View detailed information about a user's account.")
 async def info(interaction: discord.Interaction, user: discord.User = None):
@@ -1205,11 +889,6 @@ async def info(interaction: discord.Interaction, user: discord.User = None):
         project["investors"].get(user_id, 0) for project in projects.values() if project["status"] == "active"
     )
 
-    # Calculate money in loans
-    money_in_loans = sum(
-        loan["investors"].get(user_id, 0) for loan in loans.values() if loan["status"] == "approved"
-    )
-
     # Construct the info message
     info_message = (
         f"**Account Information for {user.display_name if user else interaction.user.display_name}**\n"
@@ -1218,7 +897,6 @@ async def info(interaction: discord.Interaction, user: discord.User = None):
         f"🔹 **Balance**: {balance:.2f} coins\n"
         f"🔹 **Initial Deposit**: {initial_deposit:.2f} coins\n"
         f"🔹 **Money in Projects**: {money_in_projects:.2f} coins\n"
-        f"🔹 **Money in Loans**: {money_in_loans:.2f} coins\n"
     )
 
     # Respond to the command
@@ -1264,48 +942,8 @@ async def project_info(interaction: discord.Interaction, project_name: str):
 
     await interaction.response.send_message(message, ephemeral=True)
 
-@tree.command(name="loan_info", description="View detailed information about a loan (Admin only).")
-async def loan_info(interaction: discord.Interaction, loan_id: str):
-    """
-    View detailed information about a specific loan.
-    """
-    if not has_commander_role(interaction):
-        await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
-        return
 
-    if loan_id not in loans:
-        await interaction.response.send_message(f"Loan '{loan_id}' does not exist.", ephemeral=True)
-        return
-
-    loan = loans[loan_id]
-
-    if loan["status"] not in ["approved", "running", "finished"]:
-        await interaction.response.send_message(f"Loan '{loan_id}' is not in a valid state to view.", ephemeral=True)
-        return
-
-    # Generate the message content
-    investors = loan.get("investors", {})
-    if not investors:
-        investor_info = "No users have opted into this loan."
-    else:
-        investor_info = "\n".join(
-            [f"<@{user_id}>: {amount:,.2f} coins" for user_id, amount in investors.items()]
-        )
-
-    message = (
-        f"**Loan Information: {loan['title']}**\n"
-        f"**Status**: {loan['status']}\n"
-        f"**Amount Requested**: {loan['amount']:,.2f} coins\n"
-        f"**Backing Value**: {loan['backing_value']:,.2f} coins\n"
-        f"**Interest Rate**: {loan.get('interest_rate', 0):.2f}%\n"
-        f"**Duration**: {loan['duration']}\n"
-        f"**Investors**:\n{investor_info}"
-    )
-
-    await interaction.response.send_message(message, ephemeral=True)
-
-
-@tree.command(name="view_fund_summary", description="View a summary of the total fund, loans, and projects.")
+@tree.command(name="view_fund_summary", description="View a summary of the total fund and projects.")
 async def view_fund_summary(interaction: discord.Interaction):
     if not has_commander_role(interaction):
         await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
@@ -1314,9 +952,6 @@ async def view_fund_summary(interaction: discord.Interaction):
     # Calculate total fund balance
     total_fund_balance = sum(data.get("balance", 0) for data in user_data.values())
 
-    # Count active loans
-    active_loans = [loan for loan in loans.values() if loan.get("status") in ["approved", "running"]]
-    total_loan_amount = sum(loan["amount"] for loan in active_loans)
 
     # Count active projects
     active_projects = [project for project in projects.values() if project.get("status") == "active"]
@@ -1326,7 +961,6 @@ async def view_fund_summary(interaction: discord.Interaction):
     summary = (
         f"**Fund Summary**\n"
         f"🔹 **Total Fund Balance**: {total_fund_balance:,.2f} coins\n"
-        f"🔹 **Active Loans**: {len(active_loans)} (Total Value: {total_loan_amount:,.2f} coins)\n"
         f"🔹 **Active Projects**: {len(active_projects)} (Total Invested: {total_project_invested:,.2f} coins)"
     )
 
@@ -1357,32 +991,116 @@ async def view_my_projects(interaction: discord.Interaction):
 
     await interaction.response.send_message(message, ephemeral=True)
 
-@tree.command(name="view_my_loans", description="View all loans you have invested in.")
-async def view_my_loans(interaction: discord.Interaction):
-    user_id = str(interaction.user.id)
+@tree.command(name="auction_item", description="List an item for auction.")
+async def auction_item(
+    interaction: discord.Interaction,
+    name: str,
+    price: float,
+    quantity: int,
+    picture: discord.Attachment
+):
+    """
+    Command to list an item for auction.
+    Generates a ticket channel with a username-number format and notifies BotCommanders.
+    """
+    auction_category_name = "Auction Items"
+    guild = interaction.guild
+    auction_category = discord.utils.get(guild.categories, name=auction_category_name)
 
-    # Find loans the user has invested in
-    user_loans = [
-        (loan_id, details["investors"][user_id], details)
-        for loan_id, details in loans.items()
-        if user_id in details.get("investors", {}) and details["status"] in ["approved", "running"]
-    ]
-
-    if not user_loans:
-        await interaction.response.send_message("You have not invested in any active loans.", ephemeral=True)
+    if not auction_category:
+        await interaction.response.send_message(
+            f"The category '{auction_category_name}' does not exist. Please ask an admin to create it.", ephemeral=True
+        )
         return
 
-    # Construct the message
-    message = "**Your Active Loan Investments**\n"
-    for loan_id, invested_amount, loan_details in user_loans:
-        message += (
-            f"🔹 **Loan ID**: {loan_id}\n"
-            f"   **Title**: {loan_details['title']}\n"
-            f"   **Invested Amount**: {invested_amount:,.2f} coins\n"
-            f"   **Status**: {loan_details['status']}\n"
+    # Generate a unique channel name
+    username = interaction.user.name
+    user_auction_count[username] += 1
+    auction_number = f"{user_auction_count[username]:02d}"
+    channel_name = f"{username}-{auction_number}"
+
+    bot_commander_role = discord.utils.get(guild.roles, name="BotCommander")
+    ticket_channel = await guild.create_text_channel(
+        name=channel_name,
+        category=auction_category,
+        overwrites={
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            interaction.user: discord.PermissionOverwrite(view_channel=True),
+            bot_commander_role: discord.PermissionOverwrite(view_channel=True),
+        },
+    )
+
+    # Prepare and send embed
+    embed = discord.Embed(
+        title=f"New Auction Item: {name}",
+        description=f"**Price**: {price:.2f} coins\n**Quantity**: {quantity}\n**Listed by**: {interaction.user.mention}",
+        color=discord.Color.gold(),
+    )
+    if picture.content_type.startswith("image"):
+        embed.set_image(url=picture.url)
+
+    bot_commander_mention = bot_commander_role.mention if bot_commander_role else "`BotCommander` role"
+    await ticket_channel.send(
+        f"{bot_commander_mention}, a new auction item has been listed!\n\n",
+        embed=embed
+    )
+
+    await interaction.response.send_message(
+        f"Your item has been listed for auction. Check {ticket_channel.mention} for the details.", ephemeral=True
+    )
+@tree.command(name="finish_auction", description="Finish an auction and credit the seller.")
+async def finish_auction(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel,
+    user: discord.User,
+    final_price: float
+):
+    """
+    Command for BotCommanders to finish an auction. Credits the seller with the final price.
+    """
+    # Validate the auction channel
+    if channel.category.name != "Auction Items":
+        await interaction.response.send_message(
+            "The selected channel is not in the 'Auction Items' category.", ephemeral=True
+        )
+        return
+
+    # Validate the user
+    if not user:
+        await interaction.response.send_message(
+            "The specified user could not be found. Please ensure the user is valid.", ephemeral=True
+        )
+        return
+
+    # Credit the user
+    user_id = str(user.id)
+    if user_id not in user_data:
+        user_data[user_id] = {
+            "balance": final_price,
+            "history": [(datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), final_price)],
+        }
+    else:
+        user_data[user_id]["balance"] += final_price
+        user_data[user_id]["history"].append(
+            (datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), user_data[user_id]["balance"])
         )
 
-    await interaction.response.send_message(message, ephemeral=True)
+    # Notify the user
+    try:
+        await user.send(
+            f"Your auction in channel **{channel.name}** has been completed!\n"
+            f"**Final Price**: {final_price:.2f} coins have been added to your balance."
+        )
+    except discord.Forbidden:
+        print(f"Could not send DM to user {user.id}. They may have DMs disabled.")
+
+    # Notify in the channel
+    await interaction.response.send_message(
+        f"Auction finished! {user.mention} has been credited with {final_price:.2f} coins."
+    )
+
+
+
 
 @tree.command(name="calculate_total_interest", description="Calculate total interest payout for all accounts.")
 async def calculate_total_interest(interaction: discord.Interaction):
@@ -1400,8 +1118,8 @@ async def calculate_total_interest(interaction: discord.Interaction):
         ephemeral=True
     )
 
-    @tree.command(name="restore_data", description="Restore projects and user data from backup files (Admin only).")
-    async def restore_data(interaction: discord.Interaction):
+@tree.command(name="restore_data", description="Restore projects and user data from backup files (Admin only).")
+async def restore_data(interaction: discord.Interaction):
         if not has_commander_role(interaction):
             await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
             return
@@ -1439,9 +1157,6 @@ async def backup_all_data(interaction: discord.Interaction):
         with open(PROJECTS_BACKUP_FILE, "w") as f:
             json.dump(projects, f, indent=4)
 
-        # Backup loans
-        with open(LOANS_BACKUP_FILE, "w") as f:
-            json.dump(loans, f, indent=4)
 
         await interaction.response.send_message("Backup completed successfully.", ephemeral=True)
         print("Backup completed successfully.")

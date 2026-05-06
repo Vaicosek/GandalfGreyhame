@@ -1,1 +1,14 @@
-{}
+{
+    "asf": {
+        "description": "asf",
+        "expected_yield": 456.0,
+        "expected_duration": "3 Weeks",
+        "profit_share": 564.0,
+        "total_invested": 10000.0,
+        "investors": {
+            "1203738126850461738": 10000.0
+        },
+        "status": "active",
+        "total_earnings": 0.0
+    }
+}
